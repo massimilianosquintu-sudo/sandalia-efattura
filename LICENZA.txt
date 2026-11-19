@@ -1,0 +1,25 @@
+SANDALIA e-FATTURA — LICENZA D'USO DEL SOFTWARE
+
+Copyright (c) 2026 Squintu Massimiliano. Tutti i diritti riservati.
+
+Il presente software ("Sandalia e-Fattura"), comprensivo di codice sorgente, codice
+compilato, schema di database, funzioni server, interfaccia grafica, documentazione e
+ogni elemento correlato, è opera dell'ingegno di proprietà esclusiva di Squintu Massimiliano
+(di seguito "Titolare"), tutelata dalla Legge 22 aprile 1941 n. 633 e successive modificazioni.
+
+1. Nessun diritto è trasferito con la consegna del software. L'uso è consentito solo
+   al Titolare e ai soggetti che abbiano sottoscritto con il Titolare un contratto di
+   licenza d'uso, nei limiti, per la durata e per il numero di aziende ivi indicati.
+2. Sono vietati, senza autorizzazione scritta del Titolare: la copia, la riproduzione,
+   la modifica, l'adattamento, la traduzione, la decompilazione, la distribuzione, la
+   sublicenza, la cessione, il noleggio, la pubblicazione e la messa a disposizione di terzi,
+   in tutto o in parte, anche in forma di servizio in rete.
+3. Le indicazioni di titolarità dei diritti presenti nel software non possono essere
+   rimosse o alterate.
+4. Il software è fornito per la predisposizione, la trasmissione, la ricezione e
+   l'archiviazione delle fatture elettroniche. La verifica della correttezza fiscale dei
+   singoli documenti resta in capo all'utilizzatore. La conservazione a norma è svolta da
+   un conservatore abilitato scelto dall'utilizzatore.
+5. Ogni violazione sarà perseguita a norma di legge.
+
+Per informazioni sulle licenze: Squintu Massimiliano — massimilianosquintu@pec.it
