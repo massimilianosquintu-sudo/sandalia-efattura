@@ -1161,8 +1161,15 @@ const DB = {
   idb: null,
   lsGet(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } },
+  normUrl(u) {
+    u = String(u || '').trim();
+    const dash = u.match(/supabase\.com\/dashboard\/project\/([a-z0-9]{15,30})/i); if (dash) return `https://${dash[1].toLowerCase()}.supabase.co`;
+    const m = u.match(/^(?:https?:\/\/)?([a-z0-9-]+\.supabase\.(?:co|in))/i); if (m) return 'https://' + m[1].toLowerCase();
+    try { const x = new URL(/^https?:/i.test(u) ? u : 'https://' + u); return x.origin; } catch (e) { return u.replace(/\/+$/, ''); }
+  },
   async init() {
     this.cfg = this.lsGet('sfe-config', {});
+    if (this.cfg.supabaseUrl) { const n = this.normUrl(this.cfg.supabaseUrl); if (n !== this.cfg.supabaseUrl) { this.cfg.supabaseUrl = n; this.lsSet('sfe-config', this.cfg); } }
     this.COLLS.forEach(c => this.cache[c] = []);
     if (this.cfg.supabaseUrl && this.cfg.supabaseKey && window.supabase) {
       try { this.sb = window.supabase.createClient(this.cfg.supabaseUrl, this.cfg.supabaseKey); this.mode = 'supabase'; }
@@ -1327,7 +1334,7 @@ const bind = (root, obj, onch) => {
 };
 
 const App = {
-  VERSIONE: '1.1.1', S: { az: null, view: 'dashboard', p: {} },
+  VERSIONE: '1.1.2', S: { az: null, view: 'dashboard', p: {} },
   az() { return DB.get('aziende', this.S.az); },
   nomeSogg: s => s ? (U.trim(s.denominazione) || [s.titolo, s.nome, s.cognome].filter(x => U.trim(x)).join(' ') || '(senza nome)') : '',
   toast(m, t = '') { const d = document.createElement('div'); d.className = 'toast ' + t; d.textContent = m; $('#toasts').appendChild(d); setTimeout(() => d.remove(), t === 'err' ? 6500 : 3800); },
@@ -1397,11 +1404,23 @@ const App = {
   renderLogin() {
     $('#root').innerHTML = `<div class="login"><div class="box"><div class="brand" style="padding:0 0 18px;border:none"><div class="logo"><div class="mark">SF</div><div><b style="color:var(--navy)">Sandalia e-Fattura</b><small>Fatturazione elettronica</small></div></div></div>
       <div class="grid"><div class="f"><label>Email</label><input id="lg-e" type="email" autocomplete="username"></div><div class="f"><label>Password</label><input id="lg-p" type="password" autocomplete="current-password"></div>
-      <button class="btn pri" id="lg-go" style="justify-content:center">Accedi</button><button class="btn ghost" id="lg-su" style="justify-content:center">Crea un nuovo account</button>
+      <div id="lg-msg"></div><button class="btn pri" id="lg-go" style="justify-content:center">Accedi</button><button class="btn ghost" id="lg-su" style="justify-content:center">Crea un nuovo account</button>
       <button class="btn ghost sm" id="lg-loc" style="justify-content:center">Usa la modalità locale (senza database)</button></div>
-      <p class="help" style="margin-top:16px">© 2026 Squintu Massimiliano — Tutti i diritti riservati</p></div></div>`;
-    $('#lg-go').onclick = async () => { try { await DB.login($('#lg-e').value, $('#lg-p').value); location.reload(); } catch (e) { this.toast('Accesso non riuscito: ' + e.message, 'err'); } };
-    $('#lg-su').onclick = async () => { try { await DB.signup($('#lg-e').value, $('#lg-p').value); this.toast('Account creato: controlla la email di conferma, poi accedi.', 'ok'); } catch (e) { this.toast(e.message, 'err'); } };
+      <p class="help" style="margin-top:12px">Progetto: <span class="mono">${U.esc(DB.cfg.supabaseUrl || '')}</span></p><p class="help" style="margin-top:16px">© 2026 Squintu Massimiliano — Tutti i diritti riservati</p></div></div>`;
+    const spiega = e => { const m = String((e && e.message) || e || ''); const r = [
+      [/invalid login credentials/i, 'Email o password errate, oppure account non ancora creato: usa prima "Crea un nuovo account".'],
+      [/email not confirmed/i, 'Email non ancora confermata: apri il link ricevuto per email, oppure conferma l\'utente su Supabase (Authentication → Users).'],
+      [/invalid api key|no api key|apikey/i, 'Chiave Supabase non valida: in Impostazioni → Archivio dati incolla la chiave publishable (sb_publishable_…).'],
+      [/failed to fetch|networkerror|load failed/i, 'Supabase non raggiungibile: controlla l\'URL del progetto (https://xxxx.supabase.co) e la connessione.'],
+      [/user already registered/i, 'Account già esistente con questa email: usa "Accedi".'],
+      [/password should be at least|weak password/i, 'Password troppo corta o debole: usa almeno 8 caratteri con lettere e numeri.'],
+      [/signups not allowed|signup is disabled/i, 'Registrazioni disattivate su Supabase: abilitale in Authentication → impostazioni del provider Email.'],
+      [/invalid path specified/i, 'URL del progetto non corretto: deve essere solo https://xxxx.supabase.co (senza /rest/v1 o altri percorsi). Clicca "Usa la modalità locale" e reinseriscilo in Impostazioni → Archivio dati.'],
+      [/rate limit|too many/i, 'Troppi tentativi in poco tempo: attendi qualche minuto e riprova.']];
+      const t = r.find(([re]) => re.test(m)); return (t ? t[1] : 'Errore Supabase') + ' [' + m + ']'; };
+    const msg = t => { const el = $('#lg-msg'); el.innerHTML = t ? `<div class="msg err" style="margin:0">${U.esc(t)}</div>` : ''; };
+    $('#lg-go').onclick = async () => { msg(''); try { await DB.login($('#lg-e').value.trim(), $('#lg-p').value); location.reload(); } catch (e) { msg('Accesso non riuscito. ' + spiega(e)); } };
+    $('#lg-su').onclick = async () => { msg(''); try { const r = await DB.signup($('#lg-e').value.trim(), $('#lg-p').value); if (r && r.session) location.reload(); else this.toast('Account creato. Se è attiva la conferma dell\'email, apri il link ricevuto e poi accedi.', 'ok'); } catch (e) { msg('Registrazione non riuscita. ' + spiega(e)); } };
     $('#lg-loc').onclick = () => { DB.saveCfg({}); location.reload(); };
   },
   NAV: [
@@ -2713,7 +2732,12 @@ App.VIEWS.impostazioni = function (el) {
         <div class="sec-t">Informazioni</div><dl class="kv"><dt>Prodotto</dt><dd>Sandalia e-Fattura v${this.VERSIONE}</dd><dt>Titolare dei diritti</dt><dd><b>Squintu Massimiliano</b></dd><dt>Specifiche tecniche</dt><dd>FatturaPA 1.9.1 (in uso dal 15/05/2026), schema 1.2.3, semplificata 1.0</dd><dt>Diritti</dt><dd>© 2026 Squintu Massimiliano. Tutti i diritti riservati. Software proprietario concesso in licenza d'uso non esclusiva; vietate copia, modifica, decompilazione, distribuzione e cessione a terzi senza autorizzazione scritta del titolare.</dd></dl></div></div>
     </div>`;
   bind(el, cfg); bind(el, sys);
-  $('#st-sb').onclick = () => { if (!/^https:\/\/.+/.test(cfg.supabaseUrl || '') || !U.trim(cfg.supabaseKey)) return this.toast('Indica URL e chiave del progetto Supabase', 'err'); DB.saveCfg({ supabaseUrl: cfg.supabaseUrl.trim(), supabaseKey: cfg.supabaseKey.trim() }); location.reload(); };
+  $('#st-sb').onclick = () => {
+    const url = DB.normUrl(cfg.supabaseUrl), key = U.trim(cfg.supabaseKey).replace(/^['"]|['"]$/g, '');
+    if (!/^https:\/\/[a-z0-9-]+\.[a-z.]+$/i.test(url) || !key) return this.toast('Indica URL e chiave del progetto Supabase', 'err');
+    if (/^sb_secret_/i.test(key) || /service_role/.test(key)) return this.toast('Hai incollato la chiave segreta: usa la chiave publishable (sb_publishable_…)', 'err');
+    DB.saveCfg({ supabaseUrl: url, supabaseKey: key }); location.reload();
+  };
   const sl = $('#st-loc'); if (sl) sl.onclick = () => { DB.saveCfg({}); location.reload(); };
   const so = $('#st-out'); if (so) so.onclick = async () => { await DB.logout(); location.reload(); };
   $('#st-sdi').onclick = async () => { await DB.setSistema('canale', sys.canale); await DB.setSistema('sim-esito', sys.simEsito); await DB.setSistema('codice-piattaforma', U.trim(sys.codicePiattaforma).toUpperCase()); this.toast('Impostazioni SDI salvate', 'ok'); this.refreshTop(); };
