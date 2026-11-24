@@ -1221,6 +1221,7 @@ const DB = {
     if (c === 'inbox') return { id: r.id, aziendaId: r.azienda_id, canale: r.canale, tipo: r.tipo, nomeFile: r.nome_file, idSdi: r.id_sdi, base64: r.contenuto_base64, metadati: r.metadati, elaborato: r.elaborato, ricevutoIl: r.ricevuto_il };
     const o = Object.assign({}, r.dati || {}); o.id = r.id; if (r.azienda_id) o.aziendaId = r.azienda_id;
     if (c === 'fatture' && r.xml) o.xml = r.xml;
+    if (c === 'fatture') { if (r.stato) o.stato = r.stato; if (r.id_sdi) { o.sdi = o.sdi || {}; if (!o.sdi.idSdi) o.sdi.idSdi = r.id_sdi; } }
     if (c === 'aziende' && r.pec_sdi_assegnato) o.pecSdi = r.pec_sdi_assegnato;
     return o;
   },
@@ -1334,7 +1335,7 @@ const bind = (root, obj, onch) => {
 };
 
 const App = {
-  VERSIONE: '1.1.2', S: { az: null, view: 'dashboard', p: {} },
+  VERSIONE: '1.1.3', S: { az: null, view: 'dashboard', p: {} },
   az() { return DB.get('aziende', this.S.az); },
   nomeSogg: s => s ? (U.trim(s.denominazione) || [s.titolo, s.nome, s.cognome].filter(x => U.trim(x)).join(' ') || '(senza nome)') : '',
   toast(m, t = '') { const d = document.createElement('div'); d.className = 'toast ' + t; d.textContent = m; $('#toasts').appendChild(d); setTimeout(() => d.remove(), t === 'err' ? 6500 : 3800); },
@@ -2050,15 +2051,8 @@ App.inviaSDI = async function (f, o = {}) {
   f.stato = 'INVIATA'; const t = U.calcola(f); f.totali = { imponibile: t.imponibile, imposta: t.imposta, totale: t.totale, nettoAPagare: t.nettoAPagare, ritenute: t.totRitenute };
   if (canale !== 'SIMULATORE') f.sdi.idSdi = '';
   if (canale === 'PEC') return this.inviaPEC(f, az, o);
-  if (canale !== 'SIMULATORE') {
-    if (DB.mode !== 'supabase') { this.toast('Il canale reale richiede il collegamento a Supabase e le Edge Functions', 'err'); f.stato = 'DA_INVIARE'; await DB.put('fatture', f); return false; }
-    try {
-      const { data: s } = await DB.sb.auth.getSession();
-      const r = await fetch(`${DB.cfg.supabaseUrl}/functions/v1/sdi-trasmetti`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (s.session ? s.session.access_token : DB.cfg.supabaseKey) }, body: JSON.stringify({ aziendaId: az.id, fatturaId: f.id, nomeFile, xmlBase64: U.b64enc(U.utf8(f.xml)) }) });
-      const j = await r.json(); if (!r.ok) throw new Error(j.errore || r.statusText);
-      f.sdi.idSdi = j.identificativoSdI || f.sdi.idSdi; await DB.put('fatture', f); this.toast('File trasmesso allo SDI: in attesa delle notifiche', 'ok'); return true;
-    } catch (e) { f.stato = 'DA_INVIARE'; await DB.put('fatture', f); this.toast('Trasmissione non riuscita: ' + e.message, 'err'); return false; }
-  }
+  if (canale === 'SDICOOP') return this.accodaSDICoop(f, az, nomeFile);
+  if (canale !== 'SIMULATORE') { f.stato = 'DA_INVIARE'; await DB.put('fatture', f); this.toast(`Canale ${canale} non disponibile: scegli Simulatore, PEC o SDICoop`, 'err'); return false; }
   await DB.put('fatture', f); this.log('Invio SDI', f.numero);
   // Simulatore: esito realistico in base ai controlli e al recapito
   const modo = DB.sistema('sim-esito', 'AUTO'); const cd = X.codiceDestinatario(f);
@@ -2066,6 +2060,21 @@ App.inviaSDI = async function (f, o = {}) {
   const dati = { idSdi: f.sdi.idSdi, nomeFile, hash, codiceDestinatario: cd, descrizione: this.nomeSogg(f.cessionario), errori: err.length ? err : [{ codice: '00200', msg: 'File non conforme al formato (scarto simulato)' }] };
   await this.registraNotifica(f, tipo, dati);
   if (!o.silenzioso) this.toast(tipo === 'NS' ? `Notifica di scarto: ${f.numero}` : tipo === 'MC' ? `Recapito non possibile: fattura disponibile nell'area riservata del cliente (${f.numero})` : `Ricevuta di consegna: ${f.numero}`, tipo === 'NS' ? 'err' : 'ok');
+  return true;
+};
+// Canale SDICoop: la fattura entra nella coda "outbox_sdi"; il server sul VPS la trasmette
+// allo SDI (mutua autenticazione) e registra IdentificativoSdI ed esito.
+App.accodaSDICoop = async function (f, az, nomeFile) {
+  const ko = async m => { f.stato = 'DA_INVIARE'; await DB.put('fatture', f); this.toast(m, 'err'); return false; };
+  if (DB.mode !== 'supabase') return ko('Il canale SDICoop richiede il collegamento a Supabase (Impostazioni → Database)');
+  const bytes = U.utf8(f.xml);
+  if (bytes.length > 5 * 1024 * 1024) return ko('File oltre 5 MB: lo SDI non lo accetta. Riduci gli allegati.');
+  f.sdi.canale = 'SDICOOP'; f.sdi.inCoda = new Date().toISOString();
+  await DB.put('fatture', f);
+  const { error } = await DB.sb.from('outbox_sdi').insert({ azienda_id: az.id, fattura_id: f.id, nome_file: nomeFile, contenuto_base64: U.b64enc(bytes) });
+  if (error) return ko('Accodamento non riuscito: ' + error.message + (/outbox_sdi/.test(error.message) ? ' (esegui supabase/aggiornamento-1.1.3.sql)' : ''));
+  this.log('Invio SDI (SDICoop)', f.numero);
+  this.toast('Fattura in coda: il server SDI la trasmette entro pochi secondi. Le ricevute arrivano con "Sincronizza".', 'ok');
   return true;
 };
 App.canaleAzienda = az => (az && az.canale) || DB.sistema('canale', 'SIMULATORE');
@@ -2225,7 +2234,7 @@ App.VIEWS.ricezione = function (el) {
       <div class="card"><div class="hd"><h3>${ic('inb')} Ricezione automatica</h3><div class="acts"><button class="btn sm pri" id="rz-sync">${ic('refresh')} Sincronizza ora</button></div></div><div class="bd">
         <dl class="kv"><dt>Codice destinatario</dt><dd class="mono">${U.esc(az.codiceDestinatarioRicezione || '— non impostato')}</dd><dt>PEC di ricezione</dt><dd class="mono">${U.esc(az.pec || '— non impostata')}</dd>
         <dt>Canale SDI</dt><dd>${(() => { const c = App.canaleAzienda(az); return c === 'SIMULATORE' ? '<span class="badge b-amber">Simulatore (test)</span>' : c === 'PEC' ? '<span class="badge b-green">PEC aziendale</span> <span class="help mono">' + U.esc(az.pecSdi || 'primo invio: sdi01@pec.fatturapa.it') + '</span>' : '<span class="badge b-green">' + U.esc(c) + '</span>'; })()}</dd><dt>Archivio</dt><dd>${DB.mode === 'supabase' ? 'Casella "inbox_sdi" su Supabase' : 'Locale (la ricezione automatica richiede Supabase)'}</dd></dl>
-        <div class="msg info" style="margin-top:12px">${ic('globe')}<div>Per ricevere in automatico: registra il codice destinatario della piattaforma (o la PEC) nel servizio <b>"Registrazione dell'indirizzo telematico"</b> del portale Fatture e Corrispettivi. Le Edge Functions <span class="mono">sdi-ricevi</span> (SDICoop) e <span class="mono">pec-lettore</span> depositano i file nella casella; "Sincronizza" li importa.</div></div>
+        <div class="msg info" style="margin-top:12px">${ic('globe')}<div>Per ricevere in automatico: registra il codice destinatario della piattaforma (o la PEC) nel servizio <b>"Registrazione dell'indirizzo telematico"</b> del portale Fatture e Corrispettivi. Il server SDICoop della piattaforma e il servizio PEC depositano i file nella casella; "Sincronizza" li importa.</div></div>
         <div class="sec-t">Test senza canale reale</div><p class="help">Simula l'arrivo dallo SDI di una fattura passiva intestata all'azienda (fornitore italiano, UE, extra-UE o reverse charge).</p>
         <div class="pill-row"><button class="btn sm" data-sim="IT">Fornitore italiano</button><button class="btn sm" data-sim="RC">Reverse charge edile (N6.3)</button><button class="btn sm" data-sim="UE">Fornitore UE (servizi)</button><button class="btn sm" data-sim="EX">Fornitore extra-UE</button><button class="btn sm" data-sim="PRO">Professionista con ritenuta</button></div>
       </div></div></div>
@@ -2317,10 +2326,21 @@ App.soggettoDaParte = function (p, ruolo) {
 App.sincronizzaCasella = async function () {
   if (DB.mode !== 'supabase') return this.toast('La casella automatica richiede Supabase. In modalità locale usa l\'import a richiesta o il simulatore.', 'err');
   try {
-    const items = await DB.inboxPendenti(this.S.az); if (!items.length) return this.toast('Nessun nuovo documento nella casella');
-    const out = { ok: [], dup: [], err: [], notif: 0, meta: 0, extra: [] };
-    for (const it of items) { try { await this.importaFile(U.b64dec(it.base64), it.nomeFile || 'file.xml', it.canale, out, { anagrafiche: true }); await DB.inboxElaborato(it.id); } catch (e) { out.err.push((it.nomeFile || '') + ': ' + e.message); } }
-    await this.applicaMetadati(out); this.modal('Sincronizzazione casella', this.riepilogoImport(out)); this.go(this.S.view, this.S.p);
+    await DB.loadAzienda(this.S.az);
+    const out = { ok: [], dup: [], err: [], notif: 0, meta: 0, extra: [], metadati: [] };
+    const items = await DB.inboxPendenti(this.S.az);
+    for (const it of items) {
+      try {
+        await this.importaFile(U.b64dec(it.base64), it.nomeFile || 'file.xml', it.canale, out, { anagrafiche: true });
+        if (it.tipo === 'FATTURA' && it.idSdi) out.metadati.push({ idSdi: it.idSdi, nomeFile: it.nomeFile || '' });
+        await DB.inboxElaborato(it.id);
+      } catch (e) { out.err.push((it.nomeFile || '') + ': ' + e.message); }
+    }
+    await this.applicaMetadati(out);
+    const ko = DB.list('fatture', this.S.az).filter(f => f.direzione === 'E' && f.stato === 'DA_INVIARE' && f.sdi && f.sdi.errore);
+    ko.forEach(f => out.err.push(`Fattura ${f.numero}: trasmissione SDICoop non riuscita — ${f.sdi.errore}`));
+    if (!items.length && !ko.length) { this.toast('Nessun nuovo documento nella casella'); this.go(this.S.view, this.S.p); return; }
+    this.modal('Sincronizzazione casella', this.riepilogoImport(out)); this.go(this.S.view, this.S.p);
   } catch (e) { this.toast('Errore sincronizzazione: ' + e.message, 'err'); }
 };
 App.fatturaSimulata = function (k) {
@@ -2681,7 +2701,7 @@ App.VIEWS.azienda = function (el) {
   const chk = () => { $('[data-slot="piva"]').innerHTML = U.trim(az.piva) ? (U.checkPIVA(az.piva) ? '<span class="ok">✓ valida</span>' : '<span class="ko">✗ non valida</span>') : ''; const d = U.decodeCF(az.cf); $('[data-slot="cf"]').innerHTML = U.trim(az.cf) ? (U.checkCF(az.cf) ? `<span class="ok">✓ valido${d ? ` · nato/a il ${U.dataIt(d.dataNascita)} a ${U.esc(d.comune)}` : ''}</span>` : '<span class="ko">✗ non valido</span>') : ''; $('#az-def-s').textContent = `Ritenute predefinite: ${(az.ritenuteDefault || []).map(r => r.tipo + ' ' + r.aliquota + '%').join(', ') || 'nessuna'} · Casse predefinite: ${(az.casseDefault || []).map(c => c.tipo + ' ' + c.aliquota + '%').join(', ') || 'nessuna'}`; const h = $('[data-k="contatoreInvii"]'); if (h) h.nextElementSibling.textContent = 'Il successivo sarà ' + U.progressivo((+az.contatoreInvii || 0) + 1); };
   bind(el, az, k => { if (k === 'tipoSoggetto') drawAna(); if (k === 'piva' && (!U.trim(az.trasmissione.codice) || az.trasmissione.tipo === 'AZIENDA')) { az.trasmissione.codice = az.piva; $('[data-k="trasmissione.codice"]').value = az.piva; } chk(); });
   drawAna(); chk();
-  const infoCanale = () => { const c = az.canale || DB.sistema('canale', 'SIMULATORE'); $('#az-canale-info').innerHTML = `${ic('mail')}<div>${c === 'PEC' ? `<b>Canale PEC.</b> Le fatture partono dalla PEC <b>${U.esc(az.pec || '(indica la PEC)')}</b> verso ${U.esc(az.pecSdi || 'sdi01@pec.fatturapa.it')}. Per ricevere le fatture passive sulla stessa PEC, registrala come indirizzo telematico nel portale Fatture e Corrispettivi (Registrazione dell'indirizzo telematico). ${DB.mode === 'supabase' ? 'Invio e lettura automatici tramite il servizio PEC sul server.' : 'In modalità locale l\'invio è guidato e le ricevute si importano da Ricezione.'}` : c === 'SDICOOP' ? '<b>Canale SDICoop.</b> Richiede l\'accreditamento della piattaforma: usa il dossier di accreditamento.' : '<b>Simulatore.</b> I file sono generati e controllati ma non trasmessi.'}</div>`; };
+  const infoCanale = () => { const c = az.canale || DB.sistema('canale', 'SIMULATORE'); $('#az-canale-info').innerHTML = `${ic('mail')}<div>${c === 'PEC' ? `<b>Canale PEC.</b> Le fatture partono dalla PEC <b>${U.esc(az.pec || '(indica la PEC)')}</b> verso ${U.esc(az.pecSdi || 'sdi01@pec.fatturapa.it')}. Per ricevere le fatture passive sulla stessa PEC, registrala come indirizzo telematico nel portale Fatture e Corrispettivi (Registrazione dell'indirizzo telematico). ${DB.mode === 'supabase' ? 'Invio e lettura automatici tramite il servizio PEC sul server.' : 'In modalità locale l\'invio è guidato e le ricevute si importano da Ricezione.'}` : c === 'SDICOOP' ? '<b>Canale SDICoop.</b> Le fatture sono accodate e trasmesse dal server SDICoop della piattaforma; fatture passive e ricevute arrivano nella casella (Ricezione → Sincronizza). Per ricevere, indica qui il codice destinatario assegnato dallo SDI e registralo nel portale Fatture e Corrispettivi.' : '<b>Simulatore.</b> I file sono generati e controllati ma non trasmessi.'}</div>`; };
   infoCanale(); $('[data-k="canale"]').addEventListener('change', infoCanale); $('[data-k="pec"]').addEventListener('input', infoCanale);
   const com = $('#az-com'), coml = $('#az-com-l');
   com.addEventListener('input', () => { const r = U.cercaComuni(com.value); coml.innerHTML = r.map(c => `<div data-c="${c.cat}"><b>${U.esc(c.nome)}</b> <small>(${c.prov}) ${c.cap}</small></div>`).join(''); coml.hidden = !r.length; $$('[data-c]', coml).forEach(d => d.onmousedown = () => { const c = COMUNI[d.dataset.c]; az.sede.comune = c[0]; az.sede.provincia = c[1]; if (/^\d{5}$/.test(c[2])) az.sede.cap = c[2]; com.value = c[0]; $('[data-k="sede.provincia"]').value = c[1]; $('[data-k="sede.cap"]').value = az.sede.cap || ''; coml.hidden = true; }); });
@@ -2717,7 +2737,7 @@ App.VIEWS.impostazioni = function (el) {
         ${fld('Canale di trasmissione', 'canale', { type: 'select', labels: 1, options: [['SIMULATORE', 'Simulatore (fase di test)'], ['SDICOOP', 'SDICoop – web service (accreditamento)'], ['SDIFTP', 'SDIFTP – trasferimento file (accreditamento)'], ['PROVIDER', 'Provider intermediario (API)']] })}
         ${fld('Esito del simulatore', 'simEsito', { type: 'select', labels: 1, options: [['AUTO', 'Realistico (in base ai controlli)'], ['RC', 'Sempre ricevuta di consegna'], ['NS', 'Sempre scarto'], ['MC', 'Sempre mancata consegna']] })}
         ${fld('Codice destinatario della piattaforma', 'codicePiattaforma', { max: 7, attrs: 'data-up="1"', hint: 'Assegnato dallo SDI al termine dell\'accreditamento del canale (fino a 300 codici per canale)' })}</div>
-        <div class="msg ${sys.canale === 'SIMULATORE' ? 'warn' : 'info'}" style="margin-top:10px">${ic('globe')}<div>${sys.canale === 'SIMULATORE' ? 'In modalità simulatore i file sono generati e controllati come per lo SDI, ma <b>non vengono trasmessi</b>: le notifiche sono simulate. Nessun documento ha valore fiscale.' : `Le fatture sono inviate alla Edge Function <span class="mono">sdi-trasmetti</span> di Supabase, che dialoga con lo SDI tramite il canale accreditato. Le notifiche arrivano a <span class="mono">sdi-ricevi</span> e vengono importate con "Sincronizza".`}</div></div>
+        <div class="msg ${sys.canale === 'SIMULATORE' ? 'warn' : 'info'}" style="margin-top:10px">${ic('globe')}<div>${sys.canale === 'SIMULATORE' ? 'In modalità simulatore i file sono generati e controllati come per lo SDI, ma <b>non vengono trasmessi</b>: le notifiche sono simulate. Nessun documento ha valore fiscale.' : `Le fatture entrano nella coda <span class="mono">outbox_sdi</span>: il server SDICoop della piattaforma le trasmette allo SDI con mutua autenticazione e riceve fatture passive e notifiche, che si importano con "Sincronizza".`}</div></div>
         <button class="btn pri" id="st-sdi" style="margin-top:6px">${ic('check')} Salva impostazioni SDI</button></div></div>
     </div>
     <div class="grid g2">
@@ -2773,10 +2793,10 @@ App.VIEWS.guida = function (el) {
     <h3>4. Operazioni con l'estero</h3><p><b>Fatture emesse</b> verso soggetti UE ed extra-UE: codice destinatario XXXXXXX, identificativo fiscale estero (per i privati extra-UE senza codice si usa 99999999999), CAP 00000 se non italiano. <b>Fatture ricevute</b> da fornitori esteri: si emette l'integrazione/autofattura TD17 (servizi), TD18 (beni intracomunitari) o TD19 (beni ex art. 17 c. 2) entro il 15 del mese successivo; dalle ricevute usa il pulsante "Integrazione". Acquisti da San Marino con IVA: TD28.</p>
     <h3>5. Professionisti e forfettari</h3><p>Ritenute RT01–RT06 con causale CU (A, M, Q, R, W, ecc.), anche su base ridotta (agenti: 50% o 20%). Casse TC01–TC22 con contributo integrativo soggetto a IVA; rivalsa INPS 4% come TC22. Regime forfettario RF19: operazioni con natura N2.2 e bollo virtuale di 2,00 € oltre 77,47 €. Nuovo regime di franchigia transfrontaliera RF20 (Direttiva UE 2020/285). Compensi sportivi esenti: dicitura <b>ESENZSPORT</b> negli Altri dati gestionali (specifiche 1.9.1).</p>
     <h3>6. Novità delle specifiche 1.9.1 (dal 15/05/2026)</h3><ul><li>Controllo <b>00327</b>: senza partita IVA del cessionario, il codice fiscale non può essere quello del Gruppo IVA ma della società partecipante.</li><li>Lavoratori sportivi: compensi esenti ex art. 36 c. 6 D.Lgs. 36/2021 indicati con ESENZSPORT.</li><li>Fino a 300 codici destinatario per i canali accreditati WS e SFTP; certificati del canale web service generati da file CSR.</li><li>Prodotti agroalimentari con Commissione unica nazionale: codice <b>CUN</b> in Altri dati gestionali (dal 16/05/2026, provv. 93628/2026). Verifica la dicitura esatta di TipoDato nel provvedimento.</li></ul>
-    <h3>7. Ricezione delle fatture</h3><p><b>In automatico</b>: tramite il codice destinatario della piattaforma (canale SDICoop accreditato) o la PEC dell'azienda, registrati nel servizio "Registrazione dell'indirizzo telematico" di Fatture e Corrispettivi; le Edge Functions depositano i file nella casella e "Sincronizza" li importa. <b>A richiesta</b>: caricamento di XML, P7M e ZIP, anche dal download massivo del cassetto fiscale.</p>
+    <h3>7. Ricezione delle fatture</h3><p><b>In automatico</b>: tramite il codice destinatario della piattaforma (canale SDICoop accreditato) o la PEC dell'azienda, registrati nel servizio "Registrazione dell'indirizzo telematico" di Fatture e Corrispettivi; il server SDICoop (o il servizio PEC) deposita i file nella casella e "Sincronizza" li importa. <b>A richiesta</b>: caricamento di XML, P7M e ZIP, anche dal download massivo del cassetto fiscale.</p>
     <h3>7-bis. Canale PEC (senza accreditamento)</h3><p>Ogni azienda può trasmettere e ricevere con la propria PEC. Il primo invio va all'indirizzo <b>sdi01@pec.fatturapa.it</b>; con la prima risposta lo SDI comunica l'indirizzo PEC personale (sdiNN@pec.fatturapa.it) da usare in seguito, da inserire in <b>Dati azienda → Canale SDI</b>. Il messaggio non deve superare 30 MB e ogni file 5 MB. Con Supabase il servizio <span class="mono">pec-servizio.mjs</span> spedisce le fatture in coda, legge ricevute e fatture passive e registra da solo l'indirizzo assegnato; in modalità locale l'invio è guidato e gli allegati di risposta dello SDI si caricano in <b>Ricezione e import</b>. Per ricevere le fatture passive sulla PEC, l'azienda la registra come indirizzo telematico nel portale Fatture e Corrispettivi.</p>
     <h3>8. Conservazione digitale</h3><p>Le fatture elettroniche si conservano in modalità elettronica (art. 39 DPR 633/72, DM 17/06/2014, Linee guida AgID) entro il terzo mese successivo al termine di presentazione della dichiarazione dei redditi. Sandalia e-Fattura tiene un archivio per azienda con impronte SHA-256 e prepara i pacchetti di versamento; la conservazione a norma è affidata al servizio gratuito dell'Agenzia delle Entrate o a un conservatore del Marketplace AgID.</p>
-    <h3>9. Accreditamento al canale SDICoop (passaggio alla produzione)</h3><ol><li>Disporre di un server raggiungibile in HTTPS con mutua autenticazione (qui: Supabase Edge Functions o un servizio dedicato) e di un certificato di firma.</li><li>Presentare la richiesta di accreditamento del canale web service sul sito dedicato alla fatturazione elettronica dell'Agenzia delle Entrate, generando i certificati da file CSR.</li><li>Superare i test di interoperabilità (trasmissione e ricezione di file e notifiche).</li><li>Ottenere il codice destinatario (fino a 300 per canale) e impostarlo in Impostazioni → Canale SDI, passando dal simulatore a SDICoop.</li></ol>
+    <h3>9. Accreditamento al canale SDICoop (passaggio alla produzione)</h3><ol><li>Disporre di un server raggiungibile in HTTPS con mutua autenticazione (qui: server SDICoop su VPS con Nginx, pacchetto server-sdi) e di un certificato di firma.</li><li>Presentare la richiesta di accreditamento del canale web service sul sito dedicato alla fatturazione elettronica dell'Agenzia delle Entrate, generando i certificati da file CSR.</li><li>Superare i test di interoperabilità (trasmissione e ricezione di file e notifiche).</li><li>Ottenere il codice destinatario (fino a 300 per canale) e impostarlo in Impostazioni → Canale SDI, passando dal simulatore a SDICoop.</li></ol>
     <h3>10. Diritti</h3><p>Sandalia e-Fattura è un software proprietario. © 2026 <b>Squintu Massimiliano</b> — Tutti i diritti riservati. L'uso da parte di altre aziende è subordinato a un contratto di licenza con il titolare. Le informazioni normative sono di supporto operativo e non sostituiscono la verifica professionale dei singoli casi.</p>
   </div></div>`;
 };
