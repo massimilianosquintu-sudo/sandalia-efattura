@@ -1335,7 +1335,7 @@ const bind = (root, obj, onch) => {
 };
 
 const App = {
-  VERSIONE: '1.1.3', S: { az: null, view: 'dashboard', p: {} },
+  VERSIONE: '1.1.4', S: { az: null, view: 'dashboard', p: {} },
   az() { return DB.get('aziende', this.S.az); },
   nomeSogg: s => s ? (U.trim(s.denominazione) || [s.titolo, s.nome, s.cognome].filter(x => U.trim(x)).join(' ') || '(senza nome)') : '',
   toast(m, t = '') { const d = document.createElement('div'); d.className = 'toast ' + t; d.textContent = m; $('#toasts').appendChild(d); setTimeout(() => d.remove(), t === 'err' ? 6500 : 3800); },
@@ -2271,11 +2271,15 @@ App.importaFile = async function (bytes, nome, canale, out, op = {}) {
   if (low.endsWith('.p7m') || !head.startsWith('<')) { xml = U.p7mToXml(bytes); p7m = true; } else xml = U.decodeText(bytes);
   const doc = X.parseXml(xml), rn = doc.documentElement.localName || doc.documentElement.nodeName.split(':').pop();
   if (rn === 'FileMetadati') { out.metadati = out.metadati || []; out.metadati.push({ idSdi: X.v(doc.documentElement, 'IdentificativoSdI'), nomeFile: X.v(doc.documentElement, 'NomeFile') }); out.meta++; return; }
-  if (['RicevutaConsegna', 'RicevutaScarto', 'NotificaMancataConsegna', 'NotificaEsito', 'NotificaDecorrenzaTermini', 'AttestazioneTrasmissioneFattura', 'NotificaScarto'].includes(rn)) {
+  // Notifiche SDI: nomi delle specifiche 1.9 (RicevutaImpossibilitaRecapito per B2B/B2C) e precedenti;
+  // per radici nuove o sconosciute il tipo si ricava dal nome del file (_RC_, _NS_, _MC_ …)
+  const TIPI_NOTIFICA = { RicevutaConsegna: 'RC', RicevutaScarto: 'NS', NotificaScarto: 'NS', NotificaMancataConsegna: 'MC', RicevutaImpossibilitaRecapito: 'MC', NotificaImpossibilitaRecapito: 'MC', NotificaEsito: 'NE', NotificaDecorrenzaTermini: 'DT', AttestazioneTrasmissioneFattura: 'AT' };
+  const tipoN = TIPI_NOTIFICA[rn] || (/^(Ricevuta|Notifica|Attestazione)/.test(rn) ? ((nome.match(/_(RC|NS|MC|NE|DT|AT)_\d+/i) || [])[1] || '').toUpperCase() : '');
+  if (tipoN) {
     const nf = X.v(doc.documentElement, 'NomeFile'), ids = X.v(doc.documentElement, 'IdentificativoSdI');
     const f = DB.list('fatture', az.id).find(x => x.direzione === 'E' && x.sdi && (x.sdi.nomeFile === nf || x.sdi.idSdi === ids));
     if (!f) { out.err.push(nome + ': notifica di un file non presente (' + nf + ')'); return; }
-    const tipo = { RicevutaConsegna: 'RC', RicevutaScarto: 'NS', NotificaScarto: 'NS', NotificaMancataConsegna: 'MC', NotificaEsito: 'NE', NotificaDecorrenzaTermini: 'DT', AttestazioneTrasmissioneFattura: 'AT' }[rn];
+    const tipo = tipoN;
     f.sdi.idSdi = ids || f.sdi.idSdi;
     const errori = X.qa(doc.documentElement, 'ListaErrori/Errore').map(e => ({ codice: X.v(e, 'Codice'), msg: X.v(e, 'Descrizione') }));
     await this.registraNotifica(f, tipo, { idSdi: f.sdi.idSdi, nomeFile: f.sdi.nomeFile, esito: X.v(doc.documentElement, 'EsitoCommittente/Esito') || X.v(doc.documentElement, 'Esito'), errori });
