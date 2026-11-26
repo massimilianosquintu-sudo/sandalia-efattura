@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="it" translate="no" class="notranslate">
 <head>
 <meta charset="UTF-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sandalia e-Fattura — Fatturazione elettronica</title>
 <meta name="author" content="Squintu Massimiliano">
@@ -1335,7 +1336,7 @@ const bind = (root, obj, onch) => {
 };
 
 const App = {
-  VERSIONE: '1.1.5', S: { az: null, view: 'dashboard', p: {} },
+  VERSIONE: '1.1.6', S: { az: null, view: 'dashboard', p: {} },
   az() { return DB.get('aziende', this.S.az); },
   nomeSogg: s => s ? (U.trim(s.denominazione) || [s.titolo, s.nome, s.cognome].filter(x => U.trim(x)).join(' ') || '(senza nome)') : '',
   toast(m, t = '') { const d = document.createElement('div'); d.className = 'toast ' + t; d.textContent = m; $('#toasts').appendChild(d); setTimeout(() => d.remove(), t === 'err' ? 6500 : 3800); },
@@ -2102,15 +2103,17 @@ App.chiediFirma = function (f, nomeFile) {
       <ol class="help" style="font-size:13.5px;line-height:1.8">
         <li><b>Scarica</b> il file da firmare: <span class="mono">${U.esc(nomeFile)}</span> <button class="btn sm" id="fd-dl">${ic('dl')} Scarica XML</button></li>
         <li><b>Firmalo</b> con il tuo dispositivo di firma (ArubaSign, Dike, firma remota) in formato <b>CAdES</b>: otterrai <span class="mono">${U.esc(nomeFile)}.p7m</span>. Non rinominarlo e non modificarne il contenuto.</li>
-        <li><b>Carica</b> il file firmato: <input type="file" id="fd-file" accept=".p7m,.xml"></li>
+        <li><b>Carica</b> il file firmato <span class="mono">.p7m</span>: <button class="btn sm pri" id="fd-sel">${ic('up')} Carica file firmato</button> <span id="fd-nome" class="help"></span><input type="file" id="fd-file" accept=".p7m,.xml" style="display:none"></li>
       </ol>
       <div id="fd-esito"></div>`,
       `<button class="btn" data-a="no">Annulla</button><button class="btn pri" data-a="ok" disabled>${ic('check')} Trasmetti il file firmato</button>`);
     let firma = null;
     const ok = $('[data-a="ok"]', m.el), esito = $('#fd-esito', m.el);
     $('#fd-dl', m.el).onclick = () => this.scarica(nomeFile, f.xml, 'application/xml');
+    $('#fd-sel', m.el).onclick = () => $('#fd-file', m.el).click();
     $('#fd-file', m.el).onchange = async e => {
       const file = e.target.files[0]; firma = null; ok.disabled = true; if (!file) return;
+      $('#fd-nome', m.el).textContent = file.name; e.target.value = '';
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
         if (bytes.length > 5 * 1024 * 1024) throw new Error('File oltre 5 MB: lo SDI non lo accetta.');
