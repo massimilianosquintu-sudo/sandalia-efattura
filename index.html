@@ -1336,7 +1336,7 @@ const bind = (root, obj, onch) => {
 };
 
 const App = {
-  VERSIONE: '1.1.6', S: { az: null, view: 'dashboard', p: {} },
+  VERSIONE: '1.1.7', S: { az: null, view: 'dashboard', p: {} },
   az() { return DB.get('aziende', this.S.az); },
   nomeSogg: s => s ? (U.trim(s.denominazione) || [s.titolo, s.nome, s.cognome].filter(x => U.trim(x)).join(' ') || '(senza nome)') : '',
   toast(m, t = '') { const d = document.createElement('div'); d.className = 'toast ' + t; d.textContent = m; $('#toasts').appendChild(d); setTimeout(() => d.remove(), t === 'err' ? 6500 : 3800); },
@@ -1604,6 +1604,7 @@ App.snapSoggetto = s => s ? ({
   codiceDestinatario: s.codiceDestinatario || '', pec: s.pec || '', splitPayment: !!s.splitPayment, gruppoIva: s.categoria === 'GRUPPOIVA', cfGruppo: s.cfGruppo || '',
   dichiarazioneIntento: U.clone(s.dichiarazioneIntento || {}), categoria: s.categoria, contatti: { email: s.email || '', tel: s.tel || '' }
 }) : {};
+App.TD_AUTOFATTURA = ['TD16', 'TD17', 'TD18', 'TD19', 'TD20', 'TD21', 'TD22', 'TD23', 'TD27', 'TD28', 'TD29'];
 App.rigaVuota = () => ({ descrizione: '', quantita: '1', um: '', prezzo: '', aliquota: 22, natura: '', sconti: [], codici: [], altriDati: [], ritenuta: false });
 App.nuovaFattura = function (o = {}) {
   const az = this.az();
@@ -1614,6 +1615,13 @@ App.nuovaFattura = function (o = {}) {
     pagamento: { condizioni: 'TP02', dettagli: [] }, allegati: [], causale: '', note: '', soggettoId: null, rifNormativi: {}, canale: 'SDI'
   }, o);
   if (az.regime === 'RF19' && !o.righe) f.righe[0].aliquota = 0, f.righe[0].natura = 'N2.2';
+  // Aliquota/natura predefinita (Tabelle → Aliquote, "Predefinita per le fatture emesse"), non per le autofatture
+  const pd = DB.list('tabelle', az.id).find(t => t.tipo === 'ALIQUOTA' && t.predefinita);
+  if (pd && !o.righe && !App.TD_AUTOFATTURA.includes(f.tipoDoc)) {
+    const al = U.num(pd.aliquota), nat = al ? '' : (pd.natura || '');
+    f.righe[0].aliquota = al; f.righe[0].natura = nat;
+    if (nat && pd.riferimento) f.rifNormativi = Object.assign({}, f.rifNormativi, { [nat]: pd.riferimento });
+  }
   if ((az.ritenuteDefault || []).length && !o.ritenute) f.ritenute = U.clone(az.ritenuteDefault);
   this.applicaParti(f);
   return f;
@@ -1644,11 +1652,15 @@ App.prossimoNumero = function (f) {
   let max = 0; usati.forEach(x => { const m = String(x.numero || '').match(re); if (m) max = Math.max(max, +m[1]); });
   return fmt.replace('{N}', String(max + 1)).replace('{ANNO}', anno).replace('{AA}', anno.slice(2));
 };
-App.aliqOptions = function (r) {
+App.aliqOptions = function (r, rif = {}) {
   const custom = DB.list('tabelle', this.S.az).filter(t => t.tipo === 'ALIQUOTA');
-  const val = U.num(r.aliquota) ? U.num(r.aliquota) + '|' : '0|' + (r.natura || '');
+  // Voci personalizzate a 0% (natura + riferimento normativo proprio): valore "0|natura|id"
+  const zero = custom.filter(c => !U.num(c.aliquota) && c.natura && !T.NATURE_GENERICHE.includes(c.natura));
+  const mia = !U.num(r.aliquota) && zero.find(c => c.natura === r.natura && (rif || {})[c.natura] && rif[c.natura] === c.riferimento);
+  const val = U.num(r.aliquota) ? U.num(r.aliquota) + '|' : mia ? `0|${mia.natura}|${mia.id}` : '0|' + (r.natura || '');
   const list = T.ALIQUOTE.filter(a => a).map(a => [a + '|', a + '%'])
     .concat(custom.filter(c => U.num(c.aliquota) && !T.ALIQUOTE.includes(U.num(c.aliquota))).map(c => [U.num(c.aliquota) + '|', U.num(c.aliquota) + '% ' + c.descrizione]))
+    .concat(zero.map(c => [`0|${c.natura}|${c.id}`, `${c.natura} – ${c.descrizione}`.slice(0, 70) + (c.predefinita ? ' ★' : '')]))
     .concat(T.NATURE.filter(([c]) => !T.NATURE_GENERICHE.includes(c)).map(([c, d]) => ['0|' + c, c + ' – ' + d.slice(0, 48)]));
   return list.map(([v, l]) => `<option value="${v}" ${v === val ? 'selected' : ''}>${U.esc(l)}</option>`).join('');
 };
@@ -1840,7 +1852,7 @@ App.VIEWS.editor = function (el, p) {
           <td><div class="ac"><input data-r="descrizione" value="${U.esc(r.descrizione)}" placeholder="Descrizione del bene o servizio"><div class="ac-list" hidden></div></div></td>
           <td><input class="num" data-r="quantita" value="${U.esc(r.quantita)}"></td><td><input data-r="um" value="${U.esc(r.um || '')}" list="um-list"></td>
           <td><input class="num" data-r="prezzo" value="${U.esc(r.prezzo)}"></td><td><input class="num" data-r="sconto" value="${U.esc(((r.sconti || [])[0] || {}).percentuale || '')}"></td>
-          <td><select data-r="iva">${this.aliqOptions(r)}</select></td><td class="c"><input type="checkbox" data-r="ritenuta" ${r.ritenuta ? 'checked' : ''}></td>
+          <td><select data-r="iva">${this.aliqOptions(r, f.rifNormativi)}</select></td><td class="c"><input type="checkbox" data-r="ritenuta" ${r.ritenuta ? 'checked' : ''}></td>
           <td class="r nw" data-tot>${U.eur(t.righe[i].prezzoTotale)}</td>
           <td class="nw"><button class="ibtn" data-adv title="Dettagli riga">${ic('cog')}</button><button class="ibtn" data-del title="Elimina">${ic('trash')}</button></td></tr>
           ${r._adv ? `<tr class="adv" data-i="${i}"><td></td><td colspan="9"><div class="grid g4" style="padding:6px 0">
@@ -1861,7 +1873,11 @@ App.VIEWS.editor = function (el, p) {
             const k = inp.dataset.r;
             inp.addEventListener(inp.tagName === 'SELECT' || inp.type === 'checkbox' || inp.type === 'date' ? 'change' : 'input', () => {
               const v = inp.type === 'checkbox' ? inp.checked : inp.value;
-              if (k === 'iva') { const [a, n] = v.split('|'); r.aliquota = U.num(a); r.natura = n || ''; }
+              if (k === 'iva') {
+                const [a, n, tab] = v.split('|'); r.aliquota = U.num(a); r.natura = n || '';
+                const c = tab && DB.get('tabelle', tab);
+                if (c && n && c.riferimento) { f.rifNormativi = f.rifNormativi || {}; f.rifNormativi[n] = c.riferimento; }
+              }
               else if (k === 'sconto') { r.sconti = U.num(v) ? [{ tipo: 'SC', percentuale: v }] : (r.sconti || []).filter(s => !U.num(s.percentuale) && U.num(s.importo)); }
               else if (k === 'scontoImp') { r.sconti = U.num(v) ? [{ tipo: 'SC', importo: v }] : []; }
               else if (k === 'codTipo' || k === 'codValore') { r.codici = r.codici && r.codici.length ? r.codici : [{ tipo: '', valore: '' }]; r.codici[0][k === 'codTipo' ? 'tipo' : 'valore'] = v; }
@@ -2574,7 +2590,7 @@ App.TAB_DEF = {
   SEZIONALE: { t: 'Sezionali di numerazione', campi: [['nome', 'Nome'], ['formato', 'Formato numero', '{N} = progressivo, {ANNO} = anno, {AA} = anno a 2 cifre. Es: {N}/{ANNO}, FE{N}, {N}/PA'], ['tipi', 'Documenti', '', [['VENDITE', 'Fatture e note di variazione'], ['AUTOFATTURE', 'Autofatture e integrazioni']]], ['predefinito', 'Predefinito', '', 'check']], col: s => `${U.esc(s.nome)} <span class="mono help">${U.esc(s.formato)}</span> ${s.predefinito ? '<span class="badge b-teal">predefinito</span>' : ''} <span class="help">${s.tipi === 'AUTOFATTURE' ? 'Autofatture' : 'Vendite'}</span>` },
   PAGAMENTO: { t: 'Modalità di pagamento', campi: [['nome', 'Descrizione'], ['modalita', 'Modalità (MP)', '', T.PAGAMENTI], ['giorni', 'Giorni per rata', '', 'number'], ['rate', 'Numero rate', '', 'number'], ['fineMese', 'Scadenza a fine mese', '', 'check']], col: p => `${U.esc(p.nome)} <span class="help">${p.modalita} · ${p.rate || 1} rate × ${p.giorni || 0} gg${p.fineMese ? ' FM' : ''}</span>` },
   VETTORE: { t: 'Vettori', campi: [['denominazione', 'Denominazione'], ['paese', 'Paese', '', T.PAESI], ['piva', 'Partita IVA'], ['cf', 'Codice fiscale'], ['licenza', 'Numero licenza di guida']], col: v => `${U.esc(v.denominazione)} <span class="mono help">${U.esc(v.piva || '')}</span>` },
-  ALIQUOTA: { t: 'Aliquote e riferimenti personalizzati', campi: [['descrizione', 'Descrizione'], ['aliquota', 'Aliquota %', '', 'number'], ['natura', 'Natura (se 0%)', '', T.NATURE], ['riferimento', 'Riferimento normativo']], col: a => `${U.num(a.aliquota) ? a.aliquota + '%' : U.esc(a.natura)} — ${U.esc(a.descrizione)} <span class="help">${U.esc(a.riferimento || '')}</span>` }
+  ALIQUOTA: { t: 'Aliquote e riferimenti personalizzati', campi: [['descrizione', 'Descrizione'], ['aliquota', 'Aliquota %', '', 'number'], ['natura', 'Natura (se 0%)', '', T.NATURE], ['riferimento', 'Riferimento normativo (max 100 caratteri)'], ['predefinita', 'Predefinita per le fatture emesse', '', 'check']], col: a => `${U.num(a.aliquota) ? a.aliquota + '%' : U.esc(a.natura)} — ${U.esc(a.descrizione)} <span class="help">${U.esc(a.riferimento || '')}</span>${a.predefinita ? ' <span class="badge b-green">Predefinita</span>' : ''}` }
 };
 App.VIEWS.tabelle = function (el, p) {
   const az = this.az(); const tipo = p.tipo || 'SEZIONALE';
@@ -2587,7 +2603,13 @@ App.VIEWS.tabelle = function (el, p) {
     const r = r0 ? U.clone(r0) : { aziendaId: az.id, tipo, ultimi: {} };
     const m = this.modal(def.t, `<div class="grid g2">${def.campi.map(([k, l, h, o]) => o === 'check' ? fld(l, k, { type: 'check' }) : Array.isArray(o) ? fld(l, k, { type: 'select', labels: o === T.PAGAMENTI || o === T.PAESI || o === T.NATURE ? 0 : 1, options: o, hint: h, vuoto: o === T.NATURE ? '—' : undefined }) : fld(l, k, { type: o || 'text', hint: h })).join('')}</div>`, `<button class="btn" data-x>Annulla</button><button class="btn pri" id="tb-ok">Salva</button>`);
     bind(m.el, r);
-    $('#tb-ok', m.el).onclick = async () => { if (tipo === 'SEZIONALE' && r.predefinito) for (const x of lista.filter(x => x.id !== r.id && x.tipi === r.tipi && x.predefinito)) { x.predefinito = false; await DB.put('tabelle', x); } await DB.put('tabelle', r); m.close(); this.go('tabelle', { tipo }); };
+    $('#tb-ok', m.el).onclick = async () => { if (tipo === 'SEZIONALE' && r.predefinito) for (const x of lista.filter(x => x.id !== r.id && x.tipi === r.tipi && x.predefinito)) { x.predefinito = false; await DB.put('tabelle', x); }
+      if (tipo === 'ALIQUOTA') {
+        if (!U.num(r.aliquota) && !r.natura) return this.toast('Con aliquota 0% indica la natura IVA', 'err');
+        if (r.natura && T.NATURE_GENERICHE.includes(r.natura)) return this.toast(`La natura ${r.natura} non è più ammessa dallo SDI: usa un sottocodice (es. ${r.natura}.2)`, 'err');
+        if (String(r.riferimento || '').length > 100) return this.toast('Il riferimento normativo può avere al massimo 100 caratteri', 'err');
+        if (r.predefinita) for (const x of lista.filter(x => x.id !== r.id && x.predefinita)) { x.predefinita = false; await DB.put('tabelle', x); }
+      } await DB.put('tabelle', r); m.close(); this.go('tabelle', { tipo }); };
   };
   $('#tb-new').onclick = () => ed(null);
   $$('[data-id]', el).forEach(tr => tr.onclick = e => { if (!e.target.closest('[data-del]')) ed(DB.get('tabelle', tr.dataset.id)); });
